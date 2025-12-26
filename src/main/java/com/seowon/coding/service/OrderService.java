@@ -17,6 +17,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 @Service
 @RequiredArgsConstructor
@@ -26,7 +27,7 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final ProductRepository productRepository;
     private final ProcessingStatusRepository processingStatusRepository;
-    
+
     @Transactional(readOnly = true)
     public List<Order> getAllOrders() {
         return orderRepository.findAll();
@@ -53,16 +54,60 @@ public class OrderService {
         orderRepository.deleteById(id);
     }
 
+    public void checkCustomerNameAndEmail(String customerName, String customerEmail) {
+        if (customerName == null || customerEmail == null) {
+            throw new IllegalArgumentException("customer info required");
+        }
+    }
 
+    public void orderCheck(List<OrderProduct> orderProducts) {
+        if (orderProducts == null || orderProducts.isEmpty()) {
+            throw new IllegalArgumentException("orderReqs invalid");
+        }
+    }
+
+    public Product checkProductsQuantity(OrderProduct orderProducts) {
+        int qty = orderProducts.getQuantity();
+        Long productId = orderProducts.getProductId();
+
+        Product product = productRepository.findById(productId)
+                .orElseThrow(() -> new IllegalArgumentException("Product not found: " + productId));
+        if (qty <= 0) {
+            throw new IllegalArgumentException("quantity must be positive: " + qty);
+        }
+//        찾기product에 있는 수량과 입력받은 수량 비교 후 현재 보유보다 큰 입력값일 경우 throw
+        if (product.getStockQuantity() < qty) {
+            throw new IllegalStateException("insufficient stock for product " + productId);
+        }
+        return product;
+    }
 
     public Order placeOrder(String customerName, String customerEmail, List<Long> productIds, List<Integer> quantities) {
         // TODO #3: 구현 항목
+        Order order = new Order();
+        order.setCustomerName(customerName);
+        order.setCustomerEmail(customerEmail);
+
+        List<Product> products = productIds.stream().map(productId -> {
+            return productRepository.findById(productId).orElseThrow(() -> new RuntimeException("Product not found with id: " + productId));
+        }).toList();
+//        OrderItem orderItem = new OrderItem(products);
         // * 주어진 고객 정보로 새 Order를 생성
         // * 지정된 Product를 주문에 추가
         // * order 의 상태를 PENDING 으로 변경
+        order.setStatus(Order.OrderStatus.PENDING);
         // * orderDate 를 현재시간으로 설정
+        order.setOrderDate(LocalDateTime.now());
         // * order 를 저장
+        orderRepository.save(order);
         // * 각 Product 의 재고를 수정
+        productIds.forEach(id -> {
+            Product product = productRepository.findById(id).orElseThrow(() -> new RuntimeException("Product not found with id: " + id));
+            quantities.forEach(quantity -> {
+                product.decreaseStock(quantity);
+                productRepository.save(product);
+            });
+        });
         // * placeOrder 메소드의 시그니처는 변경하지 않은 채 구현하세요.
         return null;
     }
@@ -76,12 +121,9 @@ public class OrderService {
                                String customerEmail,
                                List<OrderProduct> orderProducts,
                                String couponCode) {
-        if (customerName == null || customerEmail == null) {
-            throw new IllegalArgumentException("customer info required");
-        }
-        if (orderProducts == null || orderProducts.isEmpty()) {
-            throw new IllegalArgumentException("orderReqs invalid");
-        }
+//        빈값 들어왔을 때 throw
+        checkCustomerNameAndEmail(customerName, customerEmail);
+        orderCheck(orderProducts);
 
         Order order = Order.builder()
                 .customerName(customerName)
@@ -94,18 +136,13 @@ public class OrderService {
 
 
         BigDecimal subtotal = BigDecimal.ZERO;
+//       args == orderProducts + Order
+//        id + product + qty 3개 받아서 처리
+//        주문상품 리스트를 받아서 수량, 아이디 꺼내고 +
+        orderProducts.get(orderProducts.size()).getProductId();
         for (OrderProduct req : orderProducts) {
-            Long pid = req.getProductId();
             int qty = req.getQuantity();
-
-            Product product = productRepository.findById(pid)
-                    .orElseThrow(() -> new IllegalArgumentException("Product not found: " + pid));
-            if (qty <= 0) {
-                throw new IllegalArgumentException("quantity must be positive: " + qty);
-            }
-            if (product.getStockQuantity() < qty) {
-                throw new IllegalStateException("insufficient stock for product " + pid);
-            }
+            Product product = checkProductsQuantity(req);
 
             OrderItem item = OrderItem.builder()
                     .order(order)
@@ -115,6 +152,7 @@ public class OrderService {
                     .build();
             order.getItems().add(item);
 
+//         현재 상품의 수량 - 입력받은 수량
             product.decreaseStock(qty);
             subtotal = subtotal.add(product.getPrice().multiply(BigDecimal.valueOf(qty)));
         }
@@ -135,8 +173,13 @@ public class OrderService {
      */
     @Transactional
     public void bulkShipOrdersParent(String jobId, List<Long> orderIds) {
+
+//        orElseThrow로 예외 처리 해서 데이터 가져와야 예외처리를 할 수 있을 것 같고,
+//        ProcessingStatus 부분을 find 하려는 건지 save하려는 건지 책이 분리 부탁드립니다.
         ProcessingStatus ps = processingStatusRepository.findByJobId(jobId)
                 .orElseGet(() -> processingStatusRepository.save(ProcessingStatus.builder().jobId(jobId).build()));
+
+//        jobId, orderIds 가 null값일 경우 최상단 if문으로 선제 return 처리가 더 좋을 것 같습니다.
         ps.markRunning(orderIds == null ? 0 : orderIds.size());
         processingStatusRepository.save(ps);
 
